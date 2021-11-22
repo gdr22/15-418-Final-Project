@@ -7,10 +7,10 @@
 //void saxpyCuda(int N, float alpha, float* x, float* y, float* result);
 //void printCudaInfo();
 
-mesh_t load_mesh(std::string filename) {
-    printf("Loading mesh %s\n", filename.c_str());
+mesh_t load_mesh(const char *filename) {
+    printf("Loading mesh %s\n", filename);
 
-    FILE *input = fopen(filename.c_str(), "r");
+    FILE *input = fopen(filename, "r");
 
     mesh_t mesh;
 
@@ -65,23 +65,13 @@ void usage(const char* progname) {
 int main(int argc, char** argv)
 {
 
-    mesh_t mesh = load_mesh("/mnt/d/Documents/Classes/15-418/Final Project/data/bunny_halfedge.txt");
+    mesh_t mesh = load_mesh("../data/bunny_halfedge.txt");
 
-    for(int i = 0; i < mesh.vertex_cnt; i++) {
-        printf("%f %f %f\n", 
-                mesh.vertices[i * 3 + 0],
-                mesh.vertices[i * 3 + 1],
-                mesh.vertices[i * 3 + 2]);
-    }
+    setup(mesh);
 
-    
-    for(int i = 0; i < mesh.halfedge_cnt; i++) {
-        printf("%d %d %d %d\n", 
-                mesh.halfedges[i * 4 + 0],
-                mesh.halfedges[i * 4 + 1],
-                mesh.halfedges[i * 4 + 2],
-                mesh.halfedges[i * 4 + 3]);
-    }
+    simplify(mesh);
+
+    get_results();
 
     //printCudaInfo();
 

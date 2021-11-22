@@ -15,3 +15,7 @@ typedef struct
     float* vertices;
     int* halfedges;
 } mesh_t;
+
+void setup(mesh_t mesh);
+void simplify(mesh_t mesh);
+void get_results();
