@@ -24,8 +24,11 @@ struct GlobalConstants {
     // w - twin
     int4* halfedges;
 
-    // For each triangle, the index to a halfedge which has this vertex as the head
+    // For each triangle, the index to a halfedge which points to this triangle
     int* tri_halfedges;
+
+    // For each vertex, the index to a halfedge which has this vertex as the head
+    int* vert_halfedges;
 
     // The plane equations for each triangle
     float4* tri_planes;
@@ -79,42 +82,81 @@ __global__ void compute_triangle_quadrics() {
 }
 
 
-// Helper functions for vector operations
-/*
-// Generates the initial quadric error matrix
-__global__ void kernel_init_qerror() {
-    int index = blockIdx.x * blockDim.x + threadId.x;
-    vertex_t v1 = renderParams.V[renderParams.F[3 * index]];
-    vertex_t v2 = renderParams.V[renderParams.F[3 * index + 1]];
-    vertex_t v2 = renderParams.V[renderParams.F[3 * index + 2]];
+/* Computes the Q matrix coefficients for all vertices in the mesh
+ * using the previously computed plane equations
+ */
+__global__ void compute_vertex_quadrics() {
 
-    // Build plane equation
-    vertex_t side1 = subtract(v1, v3);
-    vertex_t side2 = subtract(v2, v3);
+    // Get the triangle we are operating over
+    int vert_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int a = side1.y * side2.z - side1.z * side2.y;
-    int b = side1.z * side2.x - side1.x * side2.z;
-    int c = side1.x * side2.y - side1.y * side2.x;
-    int d = -a * v1.x - b * v1.y - c * v1.z;
+    // Get the halfedge of this vertex
+    int base_halfedge = cuConstParams.vert_halfedges[vert_idx];
 
-    // Add to the quadric error matrix
-    for (int i = 0; i < 3; i++) {
-        vertex_index = renderParams.F[3 * index + i];
-        int *matrix_position = error_matrix + num_error_params * vertex_index;
-        atomicAdd(matrix_position, a * a);
-        atomicAdd(matrix_position + 1, a * b);
-        atomicAdd(matrix_position + 2, a * c);
-        atomicAdd(matrix_position + 3, a * d);
-        atomicAdd(matrix_position + 4, b * b);
-        atomicAdd(matrix_position + 5, b * c);
-        atomicAdd(matrix_position + 6, b * d);
-        atomicAdd(matrix_position + 7, c * c);
-        atomicAdd(matrix_position + 8, c * d);
-        atomicAdd(matrix_position + 9, d * d);
-    }
+    // Initialize the 9 coefficients of the Q matrix to zero
+    float q1 = 0.f;
+    float q2 = 0.f;
+    float q3 = 0.f;
+    float q4 = 0.f;
+    float q5 = 0.f;
+    float q6 = 0.f;
+    float q7 = 0.f;
+    float q8 = 0.f;
+    float q9 = 0.f;
+
+    // Loop around all faces incident on this vertex
+    int halfedge = base_halfedge;
+    do {
+        int triangle = cuConstParams.halfedges[halfedge].y;
+
+        float4 p = cuConstParams.tri_planes[triangle];
+
+        // Compute the matrix product p^T p
+        // Remembering that this matrix is symmetric, we 
+        // only need to compute and store half of it
+
+        q1 += p.x * p.x;
+        q2 += p.x * p.y;
+        q3 += p.x * p.z;
+        q4 += p.x * p.w;
+        
+        q5 += p.y * p.y;
+        q6 += p.y * p.z;
+        q7 += p.y * p.w;
+
+        q8 += p.z * p.z;
+        q9 += p.z * p.w;
+
+        // Because we normalize the planes over d, we know
+        // d^2 = 1, so no need to compute / save it
+
+
+        // Step to the next face
+        int twin = cuConstParams.halfedges[halfedge].w;
+        int next = cuConstParams.halfedges[twin].z;
+        halfedge = next;
+
+    // Repeat until we land on our starting halfedge
+    } while(halfedge != base_halfedge);
+
+    // Store the Q matrix coefficients for this vertex in global memory
+    /*
+    cuConstParams.Qv[vert_idx * 9 + 0] = q1;
+    cuConstParams.Qv[vert_idx * 9 + 1] = q2;
+    cuConstParams.Qv[vert_idx * 9 + 2] = q3;
+    cuConstParams.Qv[vert_idx * 9 + 3] = q4;
+
+    cuConstParams.Qv[vert_idx * 9 + 4] = q5;
+    cuConstParams.Qv[vert_idx * 9 + 5] = q6;
+    cuConstParams.Qv[vert_idx * 9 + 6] = q7;
+
+    cuConstParams.Qv[vert_idx * 9 + 7] = q8;
+    cuConstParams.Qv[vert_idx * 9 + 8] = q9;
+    */
 }
-*/
 
+
+/* Given a mesh, set up GPU state then push the mesh onto the GPU */
 void setup(mesh_t mesh) {
 
     int deviceCount = 0;
@@ -151,20 +193,27 @@ void setup(mesh_t mesh) {
 
     float3* vertex_buffer;
     int4* halfedge_buffer;
+
     int* tri_halfedge_buffer;
+    int* vert_halfedge_buffer;
 
     float4* tri_planes;
+    float* Qv;
 
     // Allocate space for the mesh
     cudaMalloc(&vertex_buffer, sizeof(float3) * mesh.vertex_cnt);
     cudaMalloc(&halfedge_buffer, sizeof(int4) * mesh.halfedge_cnt);
     cudaMalloc(&tri_halfedge_buffer, sizeof(int) * mesh.triangle_cnt);
+    cudaMalloc(&vert_halfedge_buffer, sizeof(int) * mesh.vertex_cnt);
     cudaMalloc(&tri_planes, sizeof(float4) * mesh.triangle_cnt);
+    cudaMalloc(&Qv, sizeof(float) * 9 * mesh.vertex_cnt);
 
     // Copy the 3 x N and 4 x N arrays into vector types
     float3* verts = (float3*)calloc(mesh.vertex_cnt, sizeof(float3));
     int4* halfedge = (int4*)calloc(mesh.halfedge_cnt, sizeof(int4));
+    
     int* tri_halfedges = (int*)calloc(mesh.triangle_cnt, sizeof(int));
+    int* vert_halfedges = (int*)calloc(mesh.vertex_cnt, sizeof(int));
 
     for(int i = 0; i < mesh.vertex_cnt; i++) {
         verts[i].x = mesh.vertices[i * 3 + 0];
@@ -178,6 +227,10 @@ void setup(mesh_t mesh) {
         halfedge[i].z = mesh.halfedges[i * 4 + 2];
         halfedge[i].w = mesh.halfedges[i * 4 + 3];
 
+        
+        // Set the associated halfedge for whatever vertex is the head of this halfedge
+        vert_halfedges[halfedge[i].x] = i;
+
         // Set the associated halfedge for whatever triangle this halfedge touches
         tri_halfedges[halfedge[i].y] = i;
     }
@@ -185,7 +238,7 @@ void setup(mesh_t mesh) {
     // Just make sure this array is populated properly
     for(int i = 0; i < mesh.triangle_cnt; i++) {
         if(tri_halfedges[i] == 0) {
-            printf("Triangle %d has no associated halfedge!\n");
+            printf("Triangle %d has no associated halfedge!\n", i);
         }
     }
 
@@ -193,6 +246,7 @@ void setup(mesh_t mesh) {
     cudaMemcpy(vertex_buffer, verts, sizeof(float3) * mesh.vertex_cnt, cudaMemcpyHostToDevice);
     cudaMemcpy(halfedge_buffer, halfedge, sizeof(int4) * mesh.halfedge_cnt, cudaMemcpyHostToDevice);
     cudaMemcpy(tri_halfedge_buffer, tri_halfedges, sizeof(int) * mesh.triangle_cnt, cudaMemcpyHostToDevice);
+    cudaMemcpy(vert_halfedge_buffer, vert_halfedges, sizeof(int) * mesh.vertex_cnt, cudaMemcpyHostToDevice);
 
     // Free the local arrays since we don't need them anymore
     free(verts);
@@ -200,33 +254,52 @@ void setup(mesh_t mesh) {
 
     // Pass all these parameters to the GPU
     GlobalConstants params;
-    params.vertex_cnt    = mesh.vertex_cnt;
-    params.halfedge_cnt  = mesh.halfedge_cnt;
-    params.triangle_cnt  = mesh.triangle_cnt;
-    params.vertices      = vertex_buffer;
-    params.halfedges     = halfedge_buffer;
-    params.tri_halfedges = tri_halfedge_buffer;
-    params.tri_planes    = tri_planes;
+    params.vertex_cnt     = mesh.vertex_cnt;
+    params.halfedge_cnt   = mesh.halfedge_cnt;
+    params.triangle_cnt   = mesh.triangle_cnt;
+    params.vertices       = vertex_buffer;
+    params.halfedges      = halfedge_buffer;
+
+    params.tri_halfedges  = tri_halfedge_buffer;
+    params.vert_halfedges = vert_halfedge_buffer;
+    
+    params.tri_planes     = tri_planes;
+    params.Qv             = Qv;
 
     cudaMemcpyToSymbol(cuConstParams, &params, sizeof(GlobalConstants));
 }
 
+/* Simplify the mesh stored on the GPU */
 void simplify(mesh_t mesh) {
-    
-    // 256 threads per block is a healthy number
-    int box_size = 256;
-    dim3 blockDim(box_size);
-    dim3 gridDim((mesh.triangle_cnt  + blockDim.x - 1) / blockDim.x);
+    // Step 1.1 - Compute plane equations for all triangles
+    {
+        // 256 threads per block is a healthy number
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.triangle_cnt  + blockDim.x - 1) / blockDim.x);
 
-    compute_triangle_quadrics<<<gridDim, blockDim>>>();
-    cudaDeviceSynchronize();
+        compute_triangle_quadrics<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
 
+    // Step 1.2 - Compute quadric matrix coefficients for all vertices
+    {
+        // 256 threads per block is a healthy number
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.vertex_cnt  + blockDim.x - 1) / blockDim.x);
 
+        compute_vertex_quadrics<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
 }
 
+/* Read mesh data back from the GPU and print it to stdout */
 void get_results() {
     mesh_t mesh;
 
+
+    printf("Getting results\n");
     
     // Pass all these parameters to the GPU
     GlobalConstants params;
