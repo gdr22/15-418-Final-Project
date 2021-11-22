@@ -42,7 +42,7 @@ mesh_t load_mesh(const char *filename) {
         mesh.halfedges[i * 4 + 2] = next;
         mesh.halfedges[i * 4 + 3] = twin;
 
-        mesh.triangle_cnt = std::max(mesh.triangle_cnt, triangle);
+        mesh.triangle_cnt = std::max(mesh.triangle_cnt, triangle + 1);
     }
 
     printf("Verts: %d\tHalfedges %d\tTriangles: %d\n", 
