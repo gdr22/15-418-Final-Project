@@ -54,6 +54,7 @@ __global__ void compute_triangle_quadrics() {
 
     // Get the triangle we are operating over
     int tri_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(tri_idx >= cuConstParams.triangle_cnt) return;
 
     // Get the half_edges associated with this triangle
     int half_edge1 = cuConstParams.tri_halfedges[tri_idx];
@@ -95,6 +96,7 @@ __global__ void compute_vertex_quadrics() {
 
     // Get the triangle we are operating over
     int vert_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(vert_idx >= cuConstParams.vertex_cnt) return;
 
     // Get the halfedge of this vertex
     int base_halfedge = cuConstParams.vert_halfedges[vert_idx];
@@ -136,17 +138,19 @@ __global__ void compute_vertex_quadrics() {
         // Because we normalize the planes over d, we know
         // d^2 = 1, so no need to compute / save it
 
-
         // Step to the next face
         int twin = cuConstParams.halfedges[halfedge].w;
+    
+        if(twin == -1) break;
+
         int next = cuConstParams.halfedges[twin].z;
         halfedge = next;
 
-    // Repeat until we land on our starting halfedge
-    } while(halfedge != base_halfedge);
+    // Repeat until we land on our starting halfedge or a boundary
+    } while(halfedge == base_halfedge);
 
     // Store the Q matrix coefficients for this vertex in global memory
-    /*
+
     cuConstParams.Qv[vert_idx * 9 + 0] = q1;
     cuConstParams.Qv[vert_idx * 9 + 1] = q2;
     cuConstParams.Qv[vert_idx * 9 + 2] = q3;
@@ -158,7 +162,6 @@ __global__ void compute_vertex_quadrics() {
 
     cuConstParams.Qv[vert_idx * 9 + 7] = q8;
     cuConstParams.Qv[vert_idx * 9 + 8] = q9;
-    */
 }
 
 /* Evaluates the quadric error at position p with respect to vertex v
@@ -189,9 +192,11 @@ __device__ float quadric_error(int v, float3 p) {
  * the minimum weight halfedge coming out of every vertex.
  * */
 __global__ void build_trees() {
-    int v_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int base_halfedge = cuConstParams.vert_halfedges[v_idx];
-    float3 v = cuConstParams.vertices[v_idx];
+    int vert_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(vert_idx >= cuConstParams.vertex_cnt) return;
+
+    int base_halfedge = cuConstParams.vert_halfedges[vert_idx];
+    float3 v = cuConstParams.vertices[vert_idx];
 
     // Collapsing error cannot be greater than the error threshold
     float min_error = cuConstParams.error_threshold;
@@ -200,11 +205,14 @@ __global__ void build_trees() {
 
     do {
         int twin = cuConstParams.halfedges[halfedge].w;
+    
+        if(twin == -1) break;
+
         int h_idx = cuConstParams.halfedges[twin].x;
         float3 h = cuConstParams.vertices[h_idx];
 
         float collapsing_error =
-            (quadric_error(v_idx, h) + quadric_error(h_idx, v)) / 2.f;
+            (quadric_error(vert_idx, h) + quadric_error(h_idx, v)) / 2.f;
 
         // Pick the halfedge with the lowest collapsing error
         if (collapsing_error <= min_error) {
@@ -215,7 +223,7 @@ __global__ void build_trees() {
 
     } while (halfedge != base_halfedge);
 
-    cuConstParams.Vcol[v_idx] = min_halfedge;
+    cuConstParams.Vcol[vert_idx] = min_halfedge;
 }
 
 
@@ -224,9 +232,11 @@ __global__ void build_trees() {
  * this happens we keep the halfedge for the vertex with the lower error.
  * */
 __global__ void verify_trees() {
-    int v_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int v_halfedge = cuConstParams.Vcol[v_idx];
-    float3 v = cuConstParams.vertices[v_idx];
+    int vert_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(vert_idx >= cuConstParams.vertex_cnt) return;
+    
+    int v_halfedge = cuConstParams.Vcol[vert_idx];
+    float3 v = cuConstParams.vertices[vert_idx];
 
     int twin = cuConstParams.halfedges[v_halfedge].w;
     int h_idx = cuConstParams.halfedges[twin].x;
@@ -236,15 +246,15 @@ __global__ void verify_trees() {
     if (h_halfedge != twin) return;
 
     float3 h = cuConstParams.vertices[h_idx];
-    float h_error = quadric_error(v_idx, h);
+    float h_error = quadric_error(vert_idx, h);
     float v_error = quadric_error(h_idx, v);
 
     /* Remove the tree edge pertaining to the vertex with a
      * larger collapsing error */
     bool remove_edge =
-        (v_error > h_error) || ((v_error == h_error) && (v_idx > h_idx));
+        (v_error > h_error) || ((v_error == h_error) && (vert_idx > h_idx));
 
-    if (remove_edge) cuConstParams.Vcol[v_idx] = -1;
+    if (remove_edge) cuConstParams.Vcol[vert_idx] = -1;
 }
 
 
@@ -307,7 +317,7 @@ void setup(mesh_t mesh) {
     int4* halfedge = (int4*)calloc(mesh.halfedge_cnt, sizeof(int4));
 
     int* tri_halfedges = (int*)calloc(mesh.triangle_cnt, sizeof(int));
-    int* vert_halfedges = (int*)calloc(mesh.vertex_cnt, sizeof(int));
+    int* vert_halfedges = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
 
     for(int i = 0; i < mesh.vertex_cnt; i++) {
         verts[i].x = mesh.vertices[i * 3 + 0];
@@ -335,6 +345,7 @@ void setup(mesh_t mesh) {
             printf("Triangle %d has no associated halfedge!\n", i);
         }
     }
+
 
     // Move the vector arrays to the device
     cudaMemcpy(vertex_buffer, verts, sizeof(float3) * mesh.vertex_cnt, cudaMemcpyHostToDevice);
@@ -387,6 +398,7 @@ void simplify(mesh_t mesh) {
         cudaDeviceSynchronize();
     }
 
+    /*
     // Step 2.1 - Compute embedded tree
     {
         int box_size = 256;
@@ -406,6 +418,7 @@ void simplify(mesh_t mesh) {
         verify_trees<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
+    */
 }
 
 /* Read mesh data back from the GPU and print it to stdout */
@@ -423,20 +436,35 @@ void get_results() {
     mesh.halfedge_cnt = params.halfedge_cnt;
     mesh.triangle_cnt = params.triangle_cnt;
 
+    printf("Verts: %d\tHalfedges: %d\tTriangles: %d\n",
+            mesh.vertex_cnt, mesh.halfedge_cnt, mesh.triangle_cnt);
+
     // Copy the 3 x N and 4 x N arrays into vector types
     float3* verts = (float3*)calloc(mesh.vertex_cnt, sizeof(float3));
     int4* halfedges = (int4*)calloc(mesh.halfedge_cnt, sizeof(int4));
+    float* Qv = (float*)calloc(mesh.vertex_cnt * 9, sizeof(float));
 
     // Copy the data back from the GPU
     cudaMemcpy(verts, params.vertices, sizeof(float3) * mesh.vertex_cnt, cudaMemcpyDeviceToHost);
     cudaMemcpy(halfedges, params.halfedges, sizeof(int4) * mesh.halfedge_cnt, cudaMemcpyDeviceToHost);
+    cudaMemcpy(Qv, params.Qv, sizeof(float) * mesh.vertex_cnt * 9, cudaMemcpyDeviceToHost);
 
+    /*
     for(int i = 0; i < mesh.vertex_cnt; i++) {
         printf("%f %f %f\n",
                 verts[i].x,
                 verts[i].y,
                 verts[i].z);
     }
+
+    
+    for(int i = 0; i < mesh.vertex_cnt; i++) {
+        for(int j = 0; j < 9; j++) {
+            printf("%f ", Qv[i * 9 + j]);
+        }
+        printf("\n");
+    }
+    */
 
     /*
     for(int i = 0; i < mesh.halfedge_cnt; i++) {
