@@ -140,7 +140,7 @@ __global__ void compute_vertex_quadrics() {
 
         // Step to the next face
         int twin = cuConstParams.halfedges[halfedge].w;
-    
+
         if(twin == -1) break;
 
         int next = cuConstParams.halfedges[twin].z;
@@ -205,7 +205,7 @@ __global__ void build_trees() {
 
     do {
         int twin = cuConstParams.halfedges[halfedge].w;
-    
+
         if(twin == -1) break;
 
         int h_idx = cuConstParams.halfedges[twin].x;
@@ -234,9 +234,11 @@ __global__ void build_trees() {
 __global__ void verify_trees() {
     int vert_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(vert_idx >= cuConstParams.vertex_cnt) return;
-    
+
     int v_halfedge = cuConstParams.Vcol[vert_idx];
     float3 v = cuConstParams.vertices[vert_idx];
+
+    if (v_halfedge == -1) return;
 
     int twin = cuConstParams.halfedges[v_halfedge].w;
     int h_idx = cuConstParams.halfedges[twin].x;
@@ -398,7 +400,6 @@ void simplify(mesh_t mesh) {
         cudaDeviceSynchronize();
     }
 
-    /*
     // Step 2.1 - Compute embedded tree
     {
         int box_size = 256;
@@ -418,7 +419,7 @@ void simplify(mesh_t mesh) {
         verify_trees<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
-    */
+
 }
 
 /* Read mesh data back from the GPU and print it to stdout */
@@ -457,7 +458,7 @@ void get_results() {
                 verts[i].z);
     }
 
-    
+
     for(int i = 0; i < mesh.vertex_cnt; i++) {
         for(int j = 0; j < 9; j++) {
             printf("%f ", Qv[i * 9 + j]);
