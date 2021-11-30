@@ -18,4 +18,4 @@ typedef struct
 
 void setup(mesh_t mesh);
 void simplify(mesh_t mesh);
-void get_results();
+mesh_t get_results();

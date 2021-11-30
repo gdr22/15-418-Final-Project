@@ -20,6 +20,9 @@ for vert in verts:
     f.write("%f %f %f\n" % (vert[0], vert[1], vert[2]))
 
 for halfedge in halfedges:
+    if halfedge.is_boundary:
+        print(halfedge)
+
     f.write("%d %d %d %d\n" % (halfedge.vertex_indices[0], halfedge.triangle_index, halfedge.next, halfedge.twin))
 
 f.close()

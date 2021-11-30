@@ -423,7 +423,7 @@ void simplify(mesh_t mesh) {
 }
 
 /* Read mesh data back from the GPU and print it to stdout */
-void get_results() {
+mesh_t get_results() {
     mesh_t mesh;
 
 
@@ -476,5 +476,7 @@ void get_results() {
                 halfedges[i].w);
     }
     */
+
+    return mesh;
 }
 

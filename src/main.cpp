@@ -53,6 +53,16 @@ mesh_t load_mesh(const char *filename) {
     return mesh;
 }
 
+void write_mesh(const char *filename, mesh_t mesh) {
+    printf("Writing mesh %s\n", filename);
+
+    FILE *output = fopen(filename, "w");
+
+    fprintf(output, "%d %d\n", mesh.vertex_cnt, mesh.halfedge_cnt);
+
+    fclose(output);
+}
+
 
 void usage(const char* progname) {
     printf("Usage: %s [options]\n", progname);
@@ -71,7 +81,9 @@ int main(int argc, char** argv)
 
     simplify(mesh);
 
-    get_results();
+    mesh_t out_mesh = get_results();
+
+    write_mesh("../data/bunny_halfedge_reduced.txt", out_mesh);
 
     //printCudaInfo();
 
