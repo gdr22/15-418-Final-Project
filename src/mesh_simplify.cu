@@ -450,32 +450,23 @@ mesh_t get_results() {
     cudaMemcpy(halfedges, params.halfedges, sizeof(int4) * mesh.halfedge_cnt, cudaMemcpyDeviceToHost);
     cudaMemcpy(Qv, params.Qv, sizeof(float) * mesh.vertex_cnt * 9, cudaMemcpyDeviceToHost);
 
-    /*
+    mesh.vertices = (float*)calloc(mesh.vertex_cnt * 3, sizeof(float));
+    mesh.halfedges = (int*)calloc(mesh.halfedge_cnt * 4, sizeof(int));
+
+    // Copy vertices
     for(int i = 0; i < mesh.vertex_cnt; i++) {
-        printf("%f %f %f\n",
-                verts[i].x,
-                verts[i].y,
-                verts[i].z);
+        mesh.vertices[3 * i + 0] = verts[i].x;
+        mesh.vertices[3 * i + 1] = verts[i].y;
+        mesh.vertices[3 * i + 2] = verts[i].z;
     }
 
-
-    for(int i = 0; i < mesh.vertex_cnt; i++) {
-        for(int j = 0; j < 9; j++) {
-            printf("%f ", Qv[i * 9 + j]);
-        }
-        printf("\n");
-    }
-    */
-
-    /*
+    // Copy halfedges
     for(int i = 0; i < mesh.halfedge_cnt; i++) {
-        printf("%d %d %d %d\n",
-                halfedges[i].x,
-                halfedges[i].y,
-                halfedges[i].z,
-                halfedges[i].w);
+        mesh.halfedges[4 * i + 0] = halfedges[i].x;
+        mesh.halfedges[4 * i + 1] = halfedges[i].y;
+        mesh.halfedges[4 * i + 2] = halfedges[i].z;
+        mesh.halfedges[4 * i + 3] = halfedges[i].w;
     }
-    */
 
     return mesh;
 }

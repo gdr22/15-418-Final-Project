@@ -58,17 +58,27 @@ void write_mesh(const char *filename, mesh_t mesh) {
 
     FILE *output = fopen(filename, "w");
 
+    // Write size headers
     fprintf(output, "%d %d\n", mesh.vertex_cnt, mesh.halfedge_cnt);
 
+    // Write vertices
+    for(int i = 0; i < mesh.vertex_cnt; i++) {
+        fprintf(output, "%f %f %f\n", 
+                mesh.vertices[3 * i + 0],
+                mesh.vertices[3 * i + 1],
+                mesh.vertices[3 * i + 2]);
+    }
+
+    // Write halfedges
+    for(int i = 0; i < mesh.halfedge_cnt; i++) {
+        fprintf(output, "%d %d %d %d\n", 
+                mesh.halfedges[4 * i + 0],
+                mesh.halfedges[4 * i + 1],
+                mesh.halfedges[4 * i + 2],
+                mesh.halfedges[4 * i + 3]);
+    }
+
     fclose(output);
-}
-
-
-void usage(const char* progname) {
-    printf("Usage: %s [options]\n", progname);
-    printf("Program Options:\n");
-    printf("  -n  --arraysize <INT>  Number of elements in arrays\n");
-    printf("  -?  --help             This message\n");
 }
 
 
