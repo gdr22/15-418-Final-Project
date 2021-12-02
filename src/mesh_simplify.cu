@@ -7,6 +7,11 @@
 #include <string>
 #include "helper_math.h"
 
+// Accessor macros for the fields of a halfedge
+#define VERT(e) (cuConstParams.halfedges[e].x)
+#define TRI(e) (cuConstParams.halfedges[e].y)
+#define NEXT(e) (cuConstParams.halfedges[e].z)
+#define TWIN(e) (cuConstParams.halfedges[e].w)
 
 struct GlobalConstants {
     int vertex_cnt;
@@ -41,6 +46,16 @@ struct GlobalConstants {
 
     // Array of tree edges for each vertex
     int* Vcol;
+
+    // Edges to collapse
+    int* Ecol;
+    int collapse_cnt;
+
+    // Halfedge collapse lookup table
+    int* Meg;
+
+    // Vertex collapse lookup table
+    int* Veg;
 };
 
 __constant__ GlobalConstants cuConstParams;
@@ -58,13 +73,13 @@ __global__ void compute_triangle_quadrics() {
 
     // Get the half_edges associated with this triangle
     int half_edge1 = cuConstParams.tri_halfedges[tri_idx];
-    int half_edge2 = cuConstParams.halfedges[half_edge1].z;
-    int half_edge3 = cuConstParams.halfedges[half_edge2].z;
+    int half_edge2 = NEXT(half_edge1);
+    int half_edge3 = NEXT(half_edge2);
 
     // Get the vertices of this halfedge
-    int v1 = cuConstParams.halfedges[half_edge1].x;
-    int v2 = cuConstParams.halfedges[half_edge2].x;
-    int v3 = cuConstParams.halfedges[half_edge3].x;
+    int v1 = VERT(half_edge1);
+    int v2 = VERT(half_edge2);
+    int v3 = VERT(half_edge3);
 
     // Get the vertex positions
     float3 p1 = cuConstParams.vertices[v1];
@@ -115,7 +130,7 @@ __global__ void compute_vertex_quadrics() {
     // Loop around all faces incident on this vertex
     int halfedge = base_halfedge;
     do {
-        int triangle = cuConstParams.halfedges[halfedge].y;
+        int triangle = TRI(halfedge);
 
         float4 p = cuConstParams.tri_planes[triangle];
 
@@ -139,11 +154,11 @@ __global__ void compute_vertex_quadrics() {
         // d^2 = 1, so no need to compute / save it
 
         // Step to the next face
-        int twin = cuConstParams.halfedges[halfedge].w;
+        int twin = TWIN(halfedge);
 
         if(twin == -1) break;
 
-        int next = cuConstParams.halfedges[twin].z;
+        int next = NEXT(twin);
         halfedge = next;
 
     // Repeat until we land on our starting halfedge or a boundary
@@ -204,11 +219,11 @@ __global__ void build_trees() {
     int halfedge = base_halfedge;
 
     do {
-        int twin = cuConstParams.halfedges[halfedge].w;
+        int twin = TWIN(halfedge);
 
         if(twin == -1) break;
 
-        int h_idx = cuConstParams.halfedges[twin].x;
+        int h_idx = VERT(twin);
         float3 h = cuConstParams.vertices[h_idx];
 
         float collapsing_error =
@@ -219,7 +234,7 @@ __global__ void build_trees() {
             min_error = collapsing_error;
             min_halfedge = halfedge;
         }
-        halfedge = cuConstParams.halfedges[twin].z;
+        halfedge = NEXT(twin);
 
     } while (halfedge != base_halfedge);
 
@@ -257,6 +272,64 @@ __global__ void verify_trees() {
         (v_error > h_error) || ((v_error == h_error) && (vert_idx > h_idx));
 
     if (remove_edge) cuConstParams.Vcol[vert_idx] = -1;
+}
+
+/* Go through Ecol and compute the replacement mapping for edges being removed
+ * from the mesh
+ * */
+__global__ void collapse_edges() {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= cuConstParams.halfedge_cnt) return;
+
+    if(idx % 100 != 1) return;
+
+    int halfedge = idx;
+    int twin = TWIN(halfedge);
+
+    int e1 = NEXT(halfedge);
+    int e2 = NEXT(e1);
+
+    // Mark this edge as contracted
+    cuConstParams.Meg[halfedge] = -1;
+    // And stitch the two adjacent twins together
+    cuConstParams.Meg[e1] = TWIN(e2);
+    cuConstParams.Meg[e2] = TWIN(e1);
+
+    // If we aren't on a boundary, contract this edge too
+    if(twin != -1) {
+        int e3 = NEXT(twin);
+        int e4 = NEXT(e3);
+
+        // Mark this edge as contracted
+        cuConstParams.Meg[twin] = -1;
+        // And stitch the two adjacent twins together
+        cuConstParams.Meg[e3] = TWIN(e4);
+        cuConstParams.Meg[e4] = TWIN(e3);
+    }
+
+    // List the tail vertex as collapsed into the head
+    int tail = VERT(NEXT(halfedge));
+    cuConstParams.Veg[tail] = VERT(halfedge);
+}
+
+/* Apply the halfedge and vertex replacement mappings to the mesh
+ * */
+__global__ void update_halfedges() {
+    int halfedge_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(halfedge_idx >= cuConstParams.halfedge_cnt) return;
+
+    int twin = TWIN(halfedge_idx);
+
+    // If halfedge is non-null, look up what it collapses to
+    twin = twin == -1 ? -1 : cuConstParams.Meg[twin];
+
+    // Remove collapsed vertex
+    cuConstParams.halfedges[halfedge_idx].w = twin;
+    
+    int vert = VERT(halfedge_idx);
+    vert = cuConstParams.Veg[vert];
+
+    cuConstParams.halfedges[halfedge_idx].x = vert;
 }
 
 
@@ -304,6 +377,8 @@ void setup(mesh_t mesh) {
     float4* tri_planes;
     float* Qv;
     int* Vcol;
+    int* Meg;
+    int* Veg;
 
     // Allocate space for the mesh
     cudaMalloc(&vertex_buffer, sizeof(float3) * mesh.vertex_cnt);
@@ -313,6 +388,8 @@ void setup(mesh_t mesh) {
     cudaMalloc(&tri_planes, sizeof(float4) * mesh.triangle_cnt);
     cudaMalloc(&Qv, sizeof(float) * 9 * mesh.vertex_cnt);
     cudaMalloc(&Vcol, sizeof(int) * mesh.vertex_cnt);
+    cudaMalloc(&Meg, sizeof(int) * mesh.halfedge_cnt);
+    cudaMalloc(&Veg, sizeof(int) * mesh.vertex_cnt);
 
     // Copy the 3 x N and 4 x N arrays into vector types
     float3* verts = (float3*)calloc(mesh.vertex_cnt, sizeof(float3));
@@ -321,10 +398,15 @@ void setup(mesh_t mesh) {
     int* tri_halfedges = (int*)calloc(mesh.triangle_cnt, sizeof(int));
     int* vert_halfedges = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
 
+    int* Meg_init = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
+    int* Veg_init = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
+
     for(int i = 0; i < mesh.vertex_cnt; i++) {
         verts[i].x = mesh.vertices[i * 3 + 0];
         verts[i].y = mesh.vertices[i * 3 + 1];
         verts[i].z = mesh.vertices[i * 3 + 2];
+
+        Veg_init[i] = i;
     }
 
     for(int i = 0; i < mesh.halfedge_cnt; i++) {
@@ -339,6 +421,9 @@ void setup(mesh_t mesh) {
 
         // Set the associated halfedge for whatever triangle this halfedge touches
         tri_halfedges[halfedge[i].y] = i;
+
+        // Set the edge collapse map to be the identity function
+        Meg_init[i] = i;
     }
 
     // Just make sure this array is populated properly
@@ -354,6 +439,8 @@ void setup(mesh_t mesh) {
     cudaMemcpy(halfedge_buffer, halfedge, sizeof(int4) * mesh.halfedge_cnt, cudaMemcpyHostToDevice);
     cudaMemcpy(tri_halfedge_buffer, tri_halfedges, sizeof(int) * mesh.triangle_cnt, cudaMemcpyHostToDevice);
     cudaMemcpy(vert_halfedge_buffer, vert_halfedges, sizeof(int) * mesh.vertex_cnt, cudaMemcpyHostToDevice);
+    cudaMemcpy(Meg, Meg_init, sizeof(int) * mesh.halfedge_cnt, cudaMemcpyHostToDevice);
+    cudaMemcpy(Veg, Veg_init, sizeof(int) * mesh.vertex_cnt, cudaMemcpyHostToDevice);
 
     // Free the local arrays since we don't need them anymore
     free(verts);
@@ -373,6 +460,22 @@ void setup(mesh_t mesh) {
     params.tri_planes     = tri_planes;
     params.Qv             = Qv;
     params.Vcol           = Vcol;
+
+    params.Meg            = Meg;
+    params.Veg            = Veg;
+
+
+
+    // Manually add edges to test
+    params.collapse_cnt = mesh.halfedge_cnt;
+
+
+
+
+
+
+
+
 
     cudaMemcpyToSymbol(cuConstParams, &params, sizeof(GlobalConstants));
 }
@@ -400,6 +503,8 @@ void simplify(mesh_t mesh) {
         cudaDeviceSynchronize();
     }
 
+
+    /*
     // Step 2.1 - Compute embedded tree
     {
         int box_size = 256;
@@ -417,6 +522,27 @@ void simplify(mesh_t mesh) {
         dim3 gridDim((mesh.vertex_cnt + blockDim.x - 1) / blockDim.x);
 
         verify_trees<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
+    */
+    
+    // Step 5.1 - Apply halfedge collapses and store values into the Meg array
+    {
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
+
+        collapse_edges<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
+    
+    // Step 5.2 - Push updates from Meg into the halfedge array
+    {
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
+
+        update_halfedges<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
 
@@ -453,6 +579,41 @@ mesh_t get_results() {
     mesh.vertices = (float*)calloc(mesh.vertex_cnt * 3, sizeof(float));
     mesh.halfedges = (int*)calloc(mesh.halfedge_cnt * 4, sizeof(int));
 
+
+
+    int* Meg = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
+    cudaMemcpy(Meg, params.Meg, sizeof(int) * mesh.halfedge_cnt, cudaMemcpyDeviceToHost);
+
+    int* he_idx = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
+    int new_idx = 0;
+    for(int i = 0; i < mesh.halfedge_cnt; i++) {
+        int removed = Meg[i] == i ? 1 : 0;
+        he_idx[i] = new_idx;
+
+        //printf("%02d: %d %d\n", i, removed, new_idx);
+        new_idx += removed;
+    }
+
+    int4* collapsed_halfedges = (int4*)calloc(new_idx, sizeof(int4));
+
+    for(int i = 0; i < mesh.halfedge_cnt; i++) {
+        if(Meg[i] == i ? 1 : 0) {
+            int4 halfedge = halfedges[i];
+
+            halfedge.z = he_idx[halfedge.z];
+            halfedge.w = he_idx[halfedge.w];
+
+            collapsed_halfedges[he_idx[i]] = halfedge;
+        }
+    }
+
+    mesh.halfedge_cnt = new_idx;
+    halfedges = collapsed_halfedges;
+
+
+
+
+
     // Copy vertices
     for(int i = 0; i < mesh.vertex_cnt; i++) {
         mesh.vertices[3 * i + 0] = verts[i].x;
@@ -467,6 +628,7 @@ mesh_t get_results() {
         mesh.halfedges[4 * i + 2] = halfedges[i].z;
         mesh.halfedges[4 * i + 3] = halfedges[i].w;
     }
+
 
     return mesh;
 }
