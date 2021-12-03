@@ -47,10 +47,6 @@ struct GlobalConstants {
     // Array of tree edges for each vertex
     int* Vcol;
 
-    // Edges to collapse
-    int* Ecol;
-    int collapse_cnt;
-
     // Halfedge collapse lookup table
     int* Meg;
 
@@ -215,8 +211,8 @@ __global__ void build_trees() {
 
     // Collapsing error cannot be greater than the error threshold
     float min_error = cuConstParams.error_threshold;
-    int min_halfedge = -1;
     int halfedge = base_halfedge;
+    int min_halfedge = -1;
 
     do {
         int twin = TWIN(halfedge);
@@ -274,16 +270,21 @@ __global__ void verify_trees() {
     if (remove_edge) cuConstParams.Vcol[vert_idx] = -1;
 }
 
-/* Go through Ecol and compute the replacement mapping for edges being removed
+/* Go through Vcol and compute the replacement mapping for edges being removed
  * from the mesh
  * */
 __global__ void collapse_edges() {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx >= cuConstParams.halfedge_cnt) return;
+    if(idx >= cuConstParams.vertex_cnt) return;
 
-    if(idx % 100 != 1) return;
+    int halfedge = cuConstParams.Vcol[idx];
 
-    int halfedge = idx;
+    // Ignore edges which have already been collapsed
+    //if(cuConstParams.Meg[halfedge] != halfedge) return;
+
+    // Ignore vertices with no collapsed edges
+    if(halfedge < 0) return;
+
     int twin = TWIN(halfedge);
 
     int e1 = NEXT(halfedge);
@@ -307,10 +308,48 @@ __global__ void collapse_edges() {
         cuConstParams.Meg[e4] = TWIN(e3);
     }
 
-    // List the tail vertex as collapsed into the head
+    // List the vertex as collapsed into the tail
+    int head = idx;
     int tail = VERT(NEXT(halfedge));
-    cuConstParams.Veg[tail] = VERT(halfedge);
+    cuConstParams.Veg[idx] = tail;
 }
+
+/* Compress the halfedge replacement map to all final values
+ * */
+__global__ void compress_meg() {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= cuConstParams.halfedge_cnt) return;
+
+    // Start at our current halfedge
+    int x = idx;
+
+    // Traverse the list until we reach an uncollapsed halfedge
+    while(x != cuConstParams.Meg[x]) {
+        x = cuConstParams.Meg[x];
+    }
+
+    // Point the initial halfedge to this result
+    cuConstParams.Meg[idx] = x;
+}
+
+/* Compress the vertex replacement map to all final values
+ * */
+__global__ void compress_veg() {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= cuConstParams.vertex_cnt) return;
+
+    // Start at our current halfedge
+    int x = idx;
+
+    // Traverse the list until we reach an uncollapsed halfedge
+    while(x != cuConstParams.Veg[x]) {
+        x = cuConstParams.Veg[x];
+    }
+
+    // Point the initial halfedge to this result
+    cuConstParams.Veg[idx] = x;
+}
+
 
 /* Apply the halfedge and vertex replacement mappings to the mesh
  * */
@@ -463,19 +502,7 @@ void setup(mesh_t mesh) {
 
     params.Meg            = Meg;
     params.Veg            = Veg;
-
-
-
-    // Manually add edges to test
-    params.collapse_cnt = mesh.halfedge_cnt;
-
-
-
-
-
-
-
-
+    params.error_threshold = -10.0f;
 
     cudaMemcpyToSymbol(cuConstParams, &params, sizeof(GlobalConstants));
 }
@@ -505,6 +532,7 @@ void simplify(mesh_t mesh) {
 
 
     /*
+    */
     // Step 2.1 - Compute embedded tree
     {
         int box_size = 256;
@@ -524,15 +552,25 @@ void simplify(mesh_t mesh) {
         verify_trees<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
-    */
     
+    // Step 5.1 - Apply halfedge collapses and store values into the Meg array
+    {
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.vertex_cnt  + blockDim.x - 1) / blockDim.x);
+
+        collapse_edges<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
+
     // Step 5.1 - Apply halfedge collapses and store values into the Meg array
     {
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
 
-        collapse_edges<<<gridDim, blockDim>>>();
+        compress_meg<<<gridDim, blockDim>>>();
+        compress_veg<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
     
