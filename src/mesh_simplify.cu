@@ -191,7 +191,7 @@ __device__ float quadric_error(int v, float3 p) {
     float q6 = cuConstParams.Qv[qidx + 5]; // Q23, Q32
     float q7 = cuConstParams.Qv[qidx + 6]; // Q24, Q42
     float q8 = cuConstParams.Qv[qidx + 7]; // Q33
-    float q9 = cuConstParams.Qv[qidx + 9]; // Q34, Q43
+    float q9 = cuConstParams.Qv[qidx + 8]; // Q34, Q43
 
     // Qp
     float p1 = q1 * p.x + q2 * p.y + q3 * p.z + q4;
@@ -325,11 +325,62 @@ __global__ void update_halfedges() {
 
     // Remove collapsed vertex
     cuConstParams.halfedges[halfedge_idx].w = twin;
-    
+
     int vert = VERT(halfedge_idx);
     vert = cuConstParams.Veg[vert];
 
     cuConstParams.halfedges[halfedge_idx].x = vert;
+}
+
+/* We refine vertex positions by solving the system of equations
+ * Q3v = l3 where Q3 is the top-left 3x3 submatrix of Q[v] and
+ * l3 is a vector made of the first 3 entries of 4th column of Q[v]*/
+__global__ void refine_vertices() {
+    int vidx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (vidx >= cuConstParams.vertex_cnt) return;
+
+    float3 l;
+
+    int qidx = 9 * vidx;
+    float q1 = cuConstParams.Qv[qidx];     // Q11
+    float q2 = cuConstParams.Qv[qidx + 1]; // Q12, Q21
+    float q3 = cuConstParams.Qv[qidx + 2]; // Q13, Q31
+    l.x = -cuConstParams.Qv[qidx + 3];     // Q14
+    float q4 = cuConstParams.Qv[qidx + 4]; // Q22
+    float q5 = cuConstParams.Qv[qidx + 5]; // Q23, Q32
+    l.y = -cuConstParams.Qv[qidx + 6];     // Q24
+    float q6 = cuConstParams.Qv[qidx + 7]; // Q33
+    l.z = -cuConstParams.Qv[qidx + 8];     // Q34
+
+    float3 row1 = make_float3(q1, q2, q3);
+    float3 row2 = make_float3(q2, q4, q5);
+    float3 row3 = make_float3(q3, q5, q6);
+
+    float tolerance = 1.0e-5;
+    float near_zero = 1.0e-5;
+    int n = 3;
+    float3 newv = make_float3(0.f, 0.f, 0.f);
+    float3 r = l;
+    float3 p = r;
+
+    // We solve our system iteratively with conjugate gradient descent
+    for (int k = 0; k < n; k++) {
+        float3 rold = r;
+        float3 ap = make_float3(dot(row1, p), dot(row2, p), dot(row3, p));
+
+        float alpha = dot(r, r) / fmaxf(dot(p, ap), near_zero);
+        newv = newv + alpha * p;
+        r = r - alpha * ap;
+
+        if (length(r) < tolerance) break;
+
+        float beta = dot(r, r) / fmaxf(dot(rold, rold), near_zero);
+        p = r + beta * p;
+    }
+
+    // Only make change if refinement is below error threshold
+    if (length(cuConstParams.vertices[vidx] - newv) <= cuConstParams.error_threshold)
+        cuConstParams.vertices[vidx] = newv;
 }
 
 
@@ -525,7 +576,7 @@ void simplify(mesh_t mesh) {
         cudaDeviceSynchronize();
     }
     */
-    
+
     // Step 5.1 - Apply halfedge collapses and store values into the Meg array
     {
         int box_size = 256;
@@ -535,7 +586,7 @@ void simplify(mesh_t mesh) {
         collapse_edges<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
-    
+
     // Step 5.2 - Push updates from Meg into the halfedge array
     {
         int box_size = 256;
@@ -543,6 +594,16 @@ void simplify(mesh_t mesh) {
         dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
 
         update_halfedges<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
+
+    // Step 6 - Refine vertex positions
+    {
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.vertex_cnt + blockDim.x - 1) / blockDim.x);
+
+        refine_vertices<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
 
