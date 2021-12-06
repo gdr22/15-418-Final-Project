@@ -192,7 +192,7 @@ __device__ float quadric_error(int v, float3 p) {
     // Qp
     float p1 = q1 * p.x + q2 * p.y + q3 * p.z + q4;
     float p2 = q2 * p.x + q5 * p.y + q6 * p.z + q7;
-    float p3 = q3 * p.x + q6 * p.y + q8 * p.z + q8;
+    float p3 = q3 * p.x + q6 * p.y + q8 * p.z + q9;
     float p4 = q4 * p.x + q7 * p.y + q9 * p.z + 1;
 
     // p^T(Qp)
@@ -553,7 +553,7 @@ void setup(mesh_t mesh) {
 
     params.Meg            = Meg;
     params.Veg            = Veg;
-    params.error_threshold = -10.0f;
+    params.error_threshold = 10.0f;
 
     cudaMemcpyToSymbol(cuConstParams, &params, sizeof(GlobalConstants));
 }
@@ -621,7 +621,7 @@ void simplify(mesh_t mesh) {
         update_halfedges<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
-
+/*
     // Step 6 - Refine vertex positions
     {
         int box_size = 256;
@@ -631,7 +631,7 @@ void simplify(mesh_t mesh) {
         refine_vertices<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
     }
-
+*/
 }
 
 /* Read mesh data back from the GPU and print it to stdout */
