@@ -86,7 +86,13 @@ void write_mesh(const char *filename, mesh_t mesh) {
 int main(int argc, char** argv)
 {
 
-    mesh_t mesh = load_mesh("../data/bunny_halfedge.txt");
+    char in_path[512];
+    char out_path[512];
+
+    sprintf(in_path, "../data/%s_halfedge.txt", argv[1]);
+    sprintf(out_path, "../data/%s_halfedge_reduced.txt", argv[1]);
+
+    mesh_t mesh = load_mesh(in_path);
 
     setup(mesh);
 
@@ -94,7 +100,7 @@ int main(int argc, char** argv)
 
     mesh_t out_mesh = get_results();
 
-    write_mesh("../data/bunny_halfedge_reduced.txt", out_mesh);
+    write_mesh(out_path, out_mesh);
 
     //printCudaInfo();
 

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string>
 #include "helper_math.h"
+#include "CycleTimer.h"
 
 // Accessor macros for the fields of a halfedge
 #define VERT(e) (cuConstParams.halfedges[e].x)
@@ -13,10 +14,19 @@
 #define NEXT(e) (cuConstParams.halfedges[e].z)
 #define TWIN(e) (cuConstParams.halfedges[e].w)
 
+#define ERROR_THRESHOLD 1.f
+#define MAX_BLOCK_SIZE 1024
+#define SCAN_BLOCK_DIM MAX_BLOCK_SIZE
+
+#include "exclusiveScan.cu_inl"
+
 struct GlobalConstants {
     int vertex_cnt;
     int halfedge_cnt;
     int triangle_cnt;
+
+    int *new_halfedge_cnt;
+    int *new_vertex_cnt;
 
     // Maximum error we tolerate for collapsing a vertex
     float error_threshold;
@@ -84,19 +94,21 @@ __global__ void compute_triangle_quadrics() {
 
 
     // Build plane equation
-    float3 side1 = p1 - p3;
-    float3 side2 = p2 - p3;
+    float3 side1 = p2 - p1;
+    float3 side2 = p1 - p3;
 
-    float a = side1.y * side2.z - side1.z * side2.y;
-    float b = side1.z * side2.x - side1.x * side2.z;
-    float c = side1.x * side2.y - side1.y * side2.x;
-    float d = -(a * p1.x) - (b * p1.y) - (c * p1.z);
+    float3 normal = normalize(cross(side1, side2));
+    float d = -dot(normal, p1);
 
-    // Store the planes into memory (we normalize over d)
-    cuConstParams.tri_planes[tri_idx].x = a / d;
-    cuConstParams.tri_planes[tri_idx].y = b / d;
-    cuConstParams.tri_planes[tri_idx].z = c / d;
-    cuConstParams.tri_planes[tri_idx].w = d / d;
+    //float a = side1.y * side2.z - side1.z * side2.y;
+    //float b = side1.z * side2.x - side1.x * side2.z;
+    //float c = side1.x * side2.y - side1.y * side2.x;
+    //float d = -(a * p1.x) - (b * p1.y) - (c * p1.z);
+
+    cuConstParams.tri_planes[tri_idx].x = normal.x;
+    cuConstParams.tri_planes[tri_idx].y = normal.y;
+    cuConstParams.tri_planes[tri_idx].z = normal.z;
+    cuConstParams.tri_planes[tri_idx].w = d;
 }
 
 
@@ -113,15 +125,16 @@ __global__ void compute_vertex_quadrics() {
     int base_halfedge = cuConstParams.vert_halfedges[vert_idx];
 
     // Initialize the 9 coefficients of the Q matrix to zero
-    float q1 = 0.f;
-    float q2 = 0.f;
-    float q3 = 0.f;
-    float q4 = 0.f;
-    float q5 = 0.f;
-    float q6 = 0.f;
-    float q7 = 0.f;
-    float q8 = 0.f;
-    float q9 = 0.f;
+    float q1  = 0.f;
+    float q2  = 0.f;
+    float q3  = 0.f;
+    float q4  = 0.f;
+    float q5  = 0.f;
+    float q6  = 0.f;
+    float q7  = 0.f;
+    float q8  = 0.f;
+    float q9  = 0.f;
+    float q10 = 0.f;
 
     // Loop around all faces incident on this vertex
     int halfedge = base_halfedge;
@@ -134,17 +147,19 @@ __global__ void compute_vertex_quadrics() {
         // Remembering that this matrix is symmetric, we
         // only need to compute and store half of it
 
-        q1 += p.x * p.x;
-        q2 += p.x * p.y;
-        q3 += p.x * p.z;
-        q4 += p.x * p.w;
+        q1  += p.x * p.x;
+        q2  += p.x * p.y;
+        q3  += p.x * p.z;
+        q4  += p.x * p.w;
+ 
+        q5  += p.y * p.y;
+        q6  += p.y * p.z;
+        q7  += p.y * p.w;
+ 
+        q8  += p.z * p.z;
+        q9  += p.z * p.w;
 
-        q5 += p.y * p.y;
-        q6 += p.y * p.z;
-        q7 += p.y * p.w;
-
-        q8 += p.z * p.z;
-        q9 += p.z * p.w;
+        q10 += p.w * p.w;
 
         // Because we normalize the planes over d, we know
         // d^2 = 1, so no need to compute / save it
@@ -152,7 +167,7 @@ __global__ void compute_vertex_quadrics() {
         // Step to the next face
         int twin = TWIN(halfedge);
 
-        if(twin == -1) break;
+        if(twin < 0) break;
 
         int next = NEXT(twin);
         halfedge = next;
@@ -162,38 +177,66 @@ __global__ void compute_vertex_quadrics() {
 
     // Store the Q matrix coefficients for this vertex in global memory
 
-    cuConstParams.Qv[vert_idx * 9 + 0] = q1;
-    cuConstParams.Qv[vert_idx * 9 + 1] = q2;
-    cuConstParams.Qv[vert_idx * 9 + 2] = q3;
-    cuConstParams.Qv[vert_idx * 9 + 3] = q4;
+    cuConstParams.Qv[vert_idx * 10 + 0] = q1;
+    cuConstParams.Qv[vert_idx * 10 + 1] = q2;
+    cuConstParams.Qv[vert_idx * 10 + 2] = q3;
+    cuConstParams.Qv[vert_idx * 10 + 3] = q4;
 
-    cuConstParams.Qv[vert_idx * 9 + 4] = q5;
-    cuConstParams.Qv[vert_idx * 9 + 5] = q6;
-    cuConstParams.Qv[vert_idx * 9 + 6] = q7;
+    cuConstParams.Qv[vert_idx * 10 + 4] = q5;
+    cuConstParams.Qv[vert_idx * 10 + 5] = q6;
+    cuConstParams.Qv[vert_idx * 10 + 6] = q7;
 
-    cuConstParams.Qv[vert_idx * 9 + 7] = q8;
-    cuConstParams.Qv[vert_idx * 9 + 8] = q9;
+    cuConstParams.Qv[vert_idx * 10 + 7] = q8;
+    cuConstParams.Qv[vert_idx * 10 + 8] = q9;
+
+    cuConstParams.Qv[vert_idx * 10 + 9] = q10;
 }
 
 /* Evaluates the quadric error at position p with respect to vertex v
  * Calculated by taking (p^T)Qp */
-__device__ float quadric_error(int v, float3 p) {
-    int qidx = 9 * v;
-    float q1 = cuConstParams.Qv[qidx];     // Q11
-    float q2 = cuConstParams.Qv[qidx + 1]; // Q12, Q21
-    float q3 = cuConstParams.Qv[qidx + 2]; // Q13, Q31
-    float q4 = cuConstParams.Qv[qidx + 3]; // Q14, Q41
-    float q5 = cuConstParams.Qv[qidx + 4]; // Q22
-    float q6 = cuConstParams.Qv[qidx + 5]; // Q23, Q32
-    float q7 = cuConstParams.Qv[qidx + 6]; // Q24, Q42
-    float q8 = cuConstParams.Qv[qidx + 7]; // Q33
-    float q9 = cuConstParams.Qv[qidx + 8]; // Q34, Q43
+__device__ float quadric_error(int v1, int v2, float3 p) {
+    int q1idx = 10 * v1;
+    int q2idx = 10 * v2;
+
+    float q1  = cuConstParams.Qv[q1idx];     // Q11
+    float q2  = cuConstParams.Qv[q1idx + 1]; // Q12, Q21
+    float q3  = cuConstParams.Qv[q1idx + 2]; // Q13, Q31
+    float q4  = cuConstParams.Qv[q1idx + 3]; // Q14, Q41
+    float q5  = cuConstParams.Qv[q1idx + 4]; // Q22
+    float q6  = cuConstParams.Qv[q1idx + 5]; // Q23, Q32
+    float q7  = cuConstParams.Qv[q1idx + 6]; // Q24, Q42
+    float q8  = cuConstParams.Qv[q1idx + 7]; // Q33
+    float q9  = cuConstParams.Qv[q1idx + 8]; // Q34, Q43
+    float q10 = cuConstParams.Qv[q1idx + 9]; // Q44
+
+    q1  += cuConstParams.Qv[q2idx];     // Q11
+    q2  += cuConstParams.Qv[q2idx + 1]; // Q12, Q21
+    q3  += cuConstParams.Qv[q2idx + 2]; // Q13, Q31
+    q4  += cuConstParams.Qv[q2idx + 3]; // Q14, Q41
+    q5  += cuConstParams.Qv[q2idx + 4]; // Q22
+    q6  += cuConstParams.Qv[q2idx + 5]; // Q23, Q32
+    q7  += cuConstParams.Qv[q2idx + 6]; // Q24, Q42
+    q8  += cuConstParams.Qv[q2idx + 7]; // Q33
+    q9  += cuConstParams.Qv[q2idx + 8]; // Q34, Q43
+    q10 += cuConstParams.Qv[q2idx + 9]; // Q44
+
+    // Average the two Q matrices
+    q1  /= 2.0f;
+    q2  /= 2.0f;
+    q3  /= 2.0f;
+    q4  /= 2.0f;
+    q5  /= 2.0f;
+    q6  /= 2.0f;
+    q7  /= 2.0f;
+    q8  /= 2.0f;
+    q9  /= 2.0f;
+    q10 /= 2.0f;
 
     // Qp
     float p1 = q1 * p.x + q2 * p.y + q3 * p.z + q4;
     float p2 = q2 * p.x + q5 * p.y + q6 * p.z + q7;
     float p3 = q3 * p.x + q6 * p.y + q8 * p.z + q9;
-    float p4 = q4 * p.x + q7 * p.y + q9 * p.z + 1;
+    float p4 = q4 * p.x + q7 * p.y + q9 * p.z + q10;
 
     // p^T(Qp)
     return p1 * p.x + p2 * p.y + p3 * p.z + p4;
@@ -217,19 +260,32 @@ __global__ void build_trees() {
     do {
         int twin = TWIN(halfedge);
 
-        if(twin == -1) break;
+        // Ignore any vertices on boundaries (they can potentially cause cycles)
+        if(twin < 0) {
+            min_halfedge = -1;
+            break;
+        }
 
-        int h_idx = VERT(twin);
+        int h_idx = VERT(NEXT(halfedge));
         float3 h = cuConstParams.vertices[h_idx];
 
-        float collapsing_error =
-            (quadric_error(vert_idx, h) + quadric_error(h_idx, v)) / 2.f;
+        // Find the midpoint between the two verts
+        float3 v_bar = (v + h) / 2.f;
+
+        float collapsing_error = quadric_error(vert_idx, h_idx, v_bar);
 
         // Pick the halfedge with the lowest collapsing error
-        if (collapsing_error <= min_error) {
+        if (collapsing_error < min_error) {
             min_error = collapsing_error;
             min_halfedge = halfedge;
         }
+        // If two edges have equal weight, give up for now to avoid cycles
+        else if(collapsing_error <= min_error)
+        {
+            min_halfedge = -1;
+            break;
+        }   
+
         halfedge = NEXT(twin);
 
     } while (halfedge != base_halfedge);
@@ -249,18 +305,19 @@ __global__ void verify_trees() {
     int v_halfedge = cuConstParams.Vcol[vert_idx];
     float3 v = cuConstParams.vertices[vert_idx];
 
-    if (v_halfedge == -1) return;
+    if (v_halfedge < 0) return;
 
-    int twin = cuConstParams.halfedges[v_halfedge].w;
-    int h_idx = cuConstParams.halfedges[twin].x;
+    int twin = TWIN(v_halfedge);
+    int h_idx = VERT(NEXT(v_halfedge));
     int h_halfedge = cuConstParams.Vcol[h_idx];
 
     // Consider halfedges for which their twin has also been chosen
     if (h_halfedge != twin) return;
 
+    
     float3 h = cuConstParams.vertices[h_idx];
-    float h_error = quadric_error(vert_idx, h);
-    float v_error = quadric_error(h_idx, v);
+    float h_error = quadric_error(vert_idx, h_idx, h);
+    float v_error = quadric_error(vert_idx, h_idx, v);
 
     /* Remove the tree edge pertaining to the vertex with a
      * larger collapsing error */
@@ -297,7 +354,7 @@ __global__ void collapse_edges() {
     cuConstParams.Meg[e2] = TWIN(e1);
 
     // If we aren't on a boundary, contract this edge too
-    if(twin != -1) {
+    if(twin >= 0) {
         int e3 = NEXT(twin);
         int e4 = NEXT(e3);
 
@@ -322,10 +379,12 @@ __global__ void compress_meg() {
 
     // Start at our current halfedge
     int x = idx;
+    //int cnt = 0;
 
     // Traverse the list until we reach an uncollapsed halfedge
-    while(x != cuConstParams.Meg[x]) {
+    while(x >= 0 && x != cuConstParams.Meg[x]) {
         x = cuConstParams.Meg[x];
+        //cnt++;
     }
 
     // Point the initial halfedge to this result
@@ -340,10 +399,12 @@ __global__ void compress_veg() {
 
     // Start at our current halfedge
     int x = idx;
+    int cnt = 0;
 
     // Traverse the list until we reach an uncollapsed halfedge
-    while(x != cuConstParams.Veg[x]) {
+    while(x >= 0 && x != cuConstParams.Veg[x] && cnt < 100) {
         x = cuConstParams.Veg[x];
+        cnt++;
     }
 
     // Point the initial halfedge to this result
@@ -358,37 +419,154 @@ __global__ void update_halfedges() {
     if(halfedge_idx >= cuConstParams.halfedge_cnt) return;
 
     int twin = TWIN(halfedge_idx);
+    int next = NEXT(halfedge_idx);
 
-    // If halfedge is non-null, look up what it collapses to
-    twin = twin == -1 ? -1 : cuConstParams.Meg[twin];
+    // If halfedge is non-null, look up what replaces it
+    twin = twin < 0 ? -1 : cuConstParams.Meg[twin];
+    next = next < 0 ? -1 : cuConstParams.Meg[next];
 
     // Remove collapsed vertex
+    cuConstParams.halfedges[halfedge_idx].z = next;
     cuConstParams.halfedges[halfedge_idx].w = twin;
-
+    
     int vert = VERT(halfedge_idx);
     vert = cuConstParams.Veg[vert];
 
     cuConstParams.halfedges[halfedge_idx].x = vert;
 }
 
+
+/* Use exclusive scan to remove all deleted halfedges from the mesh
+ * */
+__global__ void relabel_halfedges() {
+    __shared__ uint flags[MAX_BLOCK_SIZE];
+    __shared__ uint running[MAX_BLOCK_SIZE];
+    __shared__ uint scratch[2 * MAX_BLOCK_SIZE];
+    
+    int base = 0;
+    int halfedge_cnt = cuConstParams.halfedge_cnt;
+
+    // Iterate over all halfedges in the mesh until all have been remapped
+    int iters = (cuConstParams.halfedge_cnt + MAX_BLOCK_SIZE - 1) / MAX_BLOCK_SIZE;
+    for(int i = 0; i < iters; i++) {
+        int halfedge_idx = i * MAX_BLOCK_SIZE + threadIdx.x;
+
+        // Mark this halfedge only if no other 
+        if(halfedge_idx < halfedge_cnt) {
+            flags[threadIdx.x] = halfedge_idx == cuConstParams.Meg[halfedge_idx] ? 1 : 0;
+        }
+        else {
+            flags[threadIdx.x] = 0;
+        }
+        __syncthreads();
+
+        // Count up the index for each active halfedge here
+        sharedMemExclusiveScan(threadIdx.x, flags, running, scratch, MAX_BLOCK_SIZE);
+
+        __syncthreads();
+        int new_idx = base + running[threadIdx.x];
+
+        // The number of halfedges we have accumulated so far
+        base += running[MAX_BLOCK_SIZE - 1] + flags[MAX_BLOCK_SIZE - 1];
+
+        cuConstParams.Meg[halfedge_idx] = new_idx;
+
+        int4 he;
+
+        // Grab the halfedge we are moving
+        if(flags[threadIdx.x] > 0 && halfedge_idx < halfedge_cnt)
+            he = cuConstParams.halfedges[halfedge_idx];
+
+        //__syncthreads();
+        
+        // If this halfedge should be kept, move it to its new position
+        if(flags[threadIdx.x] > 0 && halfedge_idx < halfedge_cnt)
+            cuConstParams.halfedges[new_idx] = he;
+
+
+        __syncthreads();
+    }
+
+    __syncthreads();
+
+    // Update the halfedge count
+    if(threadIdx.x == 0) 
+        *(cuConstParams.new_halfedge_cnt) = base;
+}
+
+
+/* Use exclusive scan to remove all deleted vertices from the mesh
+ * */
+__global__ void relabel_vertices() {
+    __shared__ uint flags[MAX_BLOCK_SIZE];
+    __shared__ uint running[MAX_BLOCK_SIZE];
+    __shared__ uint scratch[2 * MAX_BLOCK_SIZE];
+    
+    int base = 0;
+    int vertex_cnt = cuConstParams.vertex_cnt;
+
+    // Iterate over all vertices in the mesh until all have been remapped
+    int iters = (cuConstParams.vertex_cnt + MAX_BLOCK_SIZE - 1) / MAX_BLOCK_SIZE;
+    for(int i = 0; i < iters; i++) {
+        int vertex_idx = i * MAX_BLOCK_SIZE + threadIdx.x;
+
+        // Mark this vertex only if no other 
+        if(vertex_idx < vertex_cnt) {
+            flags[threadIdx.x] = vertex_idx == cuConstParams.Veg[vertex_idx] ? 1 : 0;
+        }
+        else {
+            flags[threadIdx.x] = 0;
+        }
+        __syncthreads();
+
+        // Count up the index for each active vertex here
+        sharedMemExclusiveScan(threadIdx.x, flags, running, scratch, MAX_BLOCK_SIZE);
+
+        __syncthreads();
+        int new_idx = base + running[threadIdx.x];
+
+        cuConstParams.Veg[vertex_idx] = new_idx;
+
+        // If this vertex should be kept, move it to its new position
+        if(flags[threadIdx.x] > 0 && vertex_idx < vertex_cnt)
+            cuConstParams.vertices[new_idx] = cuConstParams.vertices[vertex_idx];
+
+        // The number of vertices we have accumulated so far
+        base += running[MAX_BLOCK_SIZE - 1] + flags[MAX_BLOCK_SIZE - 1];
+
+        __syncthreads();
+    }
+
+    __syncthreads();
+
+    // Update the vertex count
+    if(threadIdx.x == 0) 
+        *(cuConstParams.new_vertex_cnt) = base;
+}
+
+
+
 /* We refine vertex positions by solving the system of equations
  * Q3v = l3 where Q3 is the top-left 3x3 submatrix of Q[v] and
  * l3 is a vector made of the first 3 entries of 4th column of Q[v]*/
 __global__ void refine_vertices() {
-    int vidx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (vidx >= cuConstParams.vertex_cnt) return;
+    int v_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v_idx >= cuConstParams.vertex_cnt) return;
 
-    float3 l;
+    // Ignore vertices that have been collapsed
+    if(cuConstParams.Veg[v_idx] != v_idx) return;
 
-    int qidx = 9 * vidx;
+    int qidx = 10 * v_idx;
     float q1 = cuConstParams.Qv[qidx];     // Q11
     float q2 = cuConstParams.Qv[qidx + 1]; // Q12, Q21
     float q3 = cuConstParams.Qv[qidx + 2]; // Q13, Q31
-    l.x = -cuConstParams.Qv[qidx + 3];     // Q14
     float q4 = cuConstParams.Qv[qidx + 4]; // Q22
     float q5 = cuConstParams.Qv[qidx + 5]; // Q23, Q32
-    l.y = -cuConstParams.Qv[qidx + 6];     // Q24
     float q6 = cuConstParams.Qv[qidx + 7]; // Q33
+
+    float3 l;
+    l.x = -cuConstParams.Qv[qidx + 3];     // Q14
+    l.y = -cuConstParams.Qv[qidx + 6];     // Q24
     l.z = -cuConstParams.Qv[qidx + 8];     // Q34
 
     float3 row1 = make_float3(q1, q2, q3);
@@ -397,7 +575,7 @@ __global__ void refine_vertices() {
 
     float tolerance = 1.0e-5;
     float near_zero = 1.0e-5;
-    int n = 3;
+    int n = 11;
     float3 newv = make_float3(0.f, 0.f, 0.f);
     float3 r = l;
     float3 p = r;
@@ -418,10 +596,9 @@ __global__ void refine_vertices() {
     }
 
     // Only make change if refinement is below error threshold
-    if (length(cuConstParams.vertices[vidx] - newv) <= cuConstParams.error_threshold)
-        cuConstParams.vertices[vidx] = newv;
+    if (length(cuConstParams.vertices[v_idx] - newv) <= .001f)
+        cuConstParams.vertices[v_idx] = newv;
 }
-
 
 /* Given a mesh, set up GPU state then push the mesh onto the GPU */
 void setup(mesh_t mesh) {
@@ -470,16 +647,21 @@ void setup(mesh_t mesh) {
     int* Meg;
     int* Veg;
 
+    int* new_halfedge_cnt;
+    int* new_vertex_cnt;
+
     // Allocate space for the mesh
     cudaMalloc(&vertex_buffer, sizeof(float3) * mesh.vertex_cnt);
     cudaMalloc(&halfedge_buffer, sizeof(int4) * mesh.halfedge_cnt);
     cudaMalloc(&tri_halfedge_buffer, sizeof(int) * mesh.triangle_cnt);
     cudaMalloc(&vert_halfedge_buffer, sizeof(int) * mesh.vertex_cnt);
     cudaMalloc(&tri_planes, sizeof(float4) * mesh.triangle_cnt);
-    cudaMalloc(&Qv, sizeof(float) * 9 * mesh.vertex_cnt);
+    cudaMalloc(&Qv, sizeof(float) * 10 * mesh.vertex_cnt);
     cudaMalloc(&Vcol, sizeof(int) * mesh.vertex_cnt);
     cudaMalloc(&Meg, sizeof(int) * mesh.halfedge_cnt);
     cudaMalloc(&Veg, sizeof(int) * mesh.vertex_cnt);
+    cudaMalloc(&new_halfedge_cnt, sizeof(int));
+    cudaMalloc(&new_vertex_cnt, sizeof(int));
 
     // Copy the 3 x N and 4 x N arrays into vector types
     float3* verts = (float3*)calloc(mesh.vertex_cnt, sizeof(float3));
@@ -541,6 +723,10 @@ void setup(mesh_t mesh) {
     params.vertex_cnt     = mesh.vertex_cnt;
     params.halfedge_cnt   = mesh.halfedge_cnt;
     params.triangle_cnt   = mesh.triangle_cnt;
+
+    params.new_halfedge_cnt = new_halfedge_cnt;
+    params.new_vertex_cnt   = new_vertex_cnt;
+
     params.vertices       = vertex_buffer;
     params.halfedges      = halfedge_buffer;
 
@@ -553,15 +739,19 @@ void setup(mesh_t mesh) {
 
     params.Meg            = Meg;
     params.Veg            = Veg;
-    params.error_threshold = 10.0f;
+    params.error_threshold = ERROR_THRESHOLD;
 
     cudaMemcpyToSymbol(cuConstParams, &params, sizeof(GlobalConstants));
 }
 
 /* Simplify the mesh stored on the GPU */
 void simplify(mesh_t mesh) {
+    double total_time = 0.f;
+
     // Step 1.1 - Compute plane equations for all triangles
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         // 256 threads per block is a healthy number
         int box_size = 256;
         dim3 blockDim(box_size);
@@ -569,40 +759,80 @@ void simplify(mesh_t mesh) {
 
         compute_triangle_quadrics<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Compute plane equations:        %.03fms\n", (endTime - startTime) * 1000);
     }
 
     // Step 1.2 - Compute quadric matrix coefficients for all vertices
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.vertex_cnt  + blockDim.x - 1) / blockDim.x);
 
         compute_vertex_quadrics<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Compute vertex quadrics:        %.03fms\n", (endTime - startTime) * 1000);
     }
 
     // Step 2.1 - Compute embedded tree
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.vertex_cnt + blockDim.x - 1) / blockDim.x);
 
         build_trees<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Compute embedded trees:         %.03fms\n", (endTime - startTime) * 1000);
     }
 
     // Step 2.2 - Verify embedded tree
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.vertex_cnt + blockDim.x - 1) / blockDim.x);
 
         verify_trees<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Verify embedded trees:          %.03fms\n", (endTime - startTime) * 1000);
+    }
+    
+    // Step 5.1 - Apply halfedge collapses and store values into the Meg array
+    {
+        double startTime = CycleTimer::currentSeconds();
+        
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.vertex_cnt  + blockDim.x - 1) / blockDim.x);
+
+        collapse_edges<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Apply halfedge collapses:       %.03fms\n", (endTime - startTime) * 1000);
     }
 
     // Step 5.1 - Apply halfedge collapses and store values into the Meg array
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
@@ -610,28 +840,78 @@ void simplify(mesh_t mesh) {
         compress_meg<<<gridDim, blockDim>>>();
         compress_veg<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Compress halfedge/vertex maps:  %.03fms\n", (endTime - startTime) * 1000);
     }
-
+    
     // Step 5.2 - Push updates from Meg into the halfedge array
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
 
         update_halfedges<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Apply halfedge map:             %.03fms\n", (endTime - startTime) * 1000);
     }
-/*
+
     // Step 6 - Refine vertex positions
     {
+        double startTime = CycleTimer::currentSeconds();
+        
         int box_size = 256;
         dim3 blockDim(box_size);
         dim3 gridDim((mesh.vertex_cnt + blockDim.x - 1) / blockDim.x);
 
         refine_vertices<<<gridDim, blockDim>>>();
         cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Refine vertex positions:        %.03fms\n", (endTime - startTime) * 1000);
     }
-*/
+
+    // Step 7.1 - Make the mesh contiguous again (for sake of efficiency)
+    {
+        double startTime = CycleTimer::currentSeconds();
+        
+        int box_size = MAX_BLOCK_SIZE;
+        dim3 blockDim(box_size);
+        dim3 gridDim(1);
+
+        relabel_halfedges<<<gridDim, blockDim>>>();
+        relabel_vertices<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Relabel halfedges and vertices: %.03fms\n", (endTime - startTime) * 1000);
+    }
+    
+    // Step 7.2 - Push updates from the contiguous Meg into the halfedge array
+    {
+        double startTime = CycleTimer::currentSeconds();
+        
+        int box_size = 256;
+        dim3 blockDim(box_size);
+        dim3 gridDim((mesh.halfedge_cnt  + blockDim.x - 1) / blockDim.x);
+
+        update_halfedges<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+        
+        double endTime = CycleTimer::currentSeconds();
+        total_time += endTime - startTime;
+        printf("Apply halfedge map:             %.03fms\n", (endTime - startTime) * 1000);
+    }
+
+    printf("\nTotal time: %.03fms\n\n", total_time * 1000);
 }
 
 /* Read mesh data back from the GPU and print it to stdout */
@@ -649,56 +929,22 @@ mesh_t get_results() {
     mesh.halfedge_cnt = params.halfedge_cnt;
     mesh.triangle_cnt = params.triangle_cnt;
 
+    cudaMemcpy(&mesh.halfedge_cnt, params.new_halfedge_cnt, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&mesh.vertex_cnt, params.new_vertex_cnt, sizeof(int), cudaMemcpyDeviceToHost);
+
     printf("Verts: %d\tHalfedges: %d\tTriangles: %d\n",
             mesh.vertex_cnt, mesh.halfedge_cnt, mesh.triangle_cnt);
 
     // Copy the 3 x N and 4 x N arrays into vector types
     float3* verts = (float3*)calloc(mesh.vertex_cnt, sizeof(float3));
     int4* halfedges = (int4*)calloc(mesh.halfedge_cnt, sizeof(int4));
-    float* Qv = (float*)calloc(mesh.vertex_cnt * 9, sizeof(float));
 
     // Copy the data back from the GPU
     cudaMemcpy(verts, params.vertices, sizeof(float3) * mesh.vertex_cnt, cudaMemcpyDeviceToHost);
     cudaMemcpy(halfedges, params.halfedges, sizeof(int4) * mesh.halfedge_cnt, cudaMemcpyDeviceToHost);
-    cudaMemcpy(Qv, params.Qv, sizeof(float) * mesh.vertex_cnt * 9, cudaMemcpyDeviceToHost);
 
     mesh.vertices = (float*)calloc(mesh.vertex_cnt * 3, sizeof(float));
     mesh.halfedges = (int*)calloc(mesh.halfedge_cnt * 4, sizeof(int));
-
-
-
-    int* Meg = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
-    cudaMemcpy(Meg, params.Meg, sizeof(int) * mesh.halfedge_cnt, cudaMemcpyDeviceToHost);
-
-    int* he_idx = (int*)calloc(mesh.halfedge_cnt, sizeof(int));
-    int new_idx = 0;
-    for(int i = 0; i < mesh.halfedge_cnt; i++) {
-        int removed = Meg[i] == i ? 1 : 0;
-        he_idx[i] = new_idx;
-
-        //printf("%02d: %d %d\n", i, removed, new_idx);
-        new_idx += removed;
-    }
-
-    int4* collapsed_halfedges = (int4*)calloc(new_idx, sizeof(int4));
-
-    for(int i = 0; i < mesh.halfedge_cnt; i++) {
-        if(Meg[i] == i ? 1 : 0) {
-            int4 halfedge = halfedges[i];
-
-            halfedge.z = he_idx[halfedge.z];
-            halfedge.w = he_idx[halfedge.w];
-
-            collapsed_halfedges[he_idx[i]] = halfedge;
-        }
-    }
-
-    mesh.halfedge_cnt = new_idx;
-    halfedges = collapsed_halfedges;
-
-
-
-
 
     // Copy vertices
     for(int i = 0; i < mesh.vertex_cnt; i++) {
