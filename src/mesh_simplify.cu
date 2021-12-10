@@ -100,11 +100,6 @@ __global__ void compute_triangle_quadrics() {
     float3 normal = normalize(cross(side1, side2));
     float d = -dot(normal, p1);
 
-    //float a = side1.y * side2.z - side1.z * side2.y;
-    //float b = side1.z * side2.x - side1.x * side2.z;
-    //float c = side1.x * side2.y - side1.y * side2.x;
-    //float d = -(a * p1.x) - (b * p1.y) - (c * p1.z);
-
     cuConstParams.tri_planes[tri_idx].x = normal.x;
     cuConstParams.tri_planes[tri_idx].y = normal.y;
     cuConstParams.tri_planes[tri_idx].z = normal.z;
@@ -379,12 +374,10 @@ __global__ void compress_meg() {
 
     // Start at our current halfedge
     int x = idx;
-    //int cnt = 0;
 
     // Traverse the list until we reach an uncollapsed halfedge
     while(x >= 0 && x != cuConstParams.Meg[x]) {
         x = cuConstParams.Meg[x];
-        //cnt++;
     }
 
     // Point the initial halfedge to this result
@@ -476,8 +469,6 @@ __global__ void relabel_halfedges() {
         // Grab the halfedge we are moving
         if(flags[threadIdx.x] > 0 && halfedge_idx < halfedge_cnt)
             he = cuConstParams.halfedges[halfedge_idx];
-
-        //__syncthreads();
         
         // If this halfedge should be kept, move it to its new position
         if(flags[threadIdx.x] > 0 && halfedge_idx < halfedge_cnt)
@@ -548,7 +539,9 @@ __global__ void relabel_vertices() {
 
 /* We refine vertex positions by solving the system of equations
  * Q3v = l3 where Q3 is the top-left 3x3 submatrix of Q[v] and
- * l3 is a vector made of the first 3 entries of 4th column of Q[v]*/
+ * l3 is a vector made of the first 3 entries of 4th column of Q[v].
+ * We solve the linear equation using the conjugate gradient method. 
+ * Code is based on: http://www.cplusplus.com/forum/general/222617/*/
 __global__ void refine_vertices() {
     int v_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (v_idx >= cuConstParams.vertex_cnt) return;

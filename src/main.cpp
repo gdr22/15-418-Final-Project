@@ -102,7 +102,5 @@ int main(int argc, char** argv)
 
     write_mesh(out_path, out_mesh);
 
-    //printCudaInfo();
-
     return 0;
 }
